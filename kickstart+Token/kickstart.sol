@@ -1,207 +1,107 @@
 pragma solidity ^0.4.25;
 
+import "./Token_ERC20.sol";
 
-contract SafeMath {
-    function safeAdd(uint a, uint b) public pure returns (uint c) {
-        c = a + b;
-        require(c >= a);
+contract CampaignFactory {
+    address[] public deployedCampaigns;
+
+    function createCampaign(uint minimum, string _sym, string _name) public {
+        address newCampaign = new Campaign(minimum, msg.sender, _sym, _name);
+        deployedCampaigns.push(newCampaign);
     }
-    function safeSub(uint a, uint b) public pure returns (uint c) {
-        require(b <= a);
-        c = a - b;
+
+    function getDeployedCampaigns() public view returns (address[]) {
+        return deployedCampaigns;
     }
 }
 
-
-// ----------------------------------------------------------------------------
-// ERC Token Standard #20 Interface
-// https://github.com/ethereum/EIPs/blob/master/EIPS/eip-20-token-standard.md
-// ----------------------------------------------------------------------------
-contract ERC20Interface {
-    function totalSupply() public constant returns (uint);
-    function balanceOf(address tokenOwner) public constant returns (uint balance);
-    function allowance(address tokenOwner, address spender) public constant returns (uint remaining);
-    function transfer(address to, uint tokens) public returns (bool success);
-    function approve(address spender, uint tokens) public returns (bool success);
-    function transferFrom(address from, address to, uint tokens) public returns (bool success);
-
-    event Transfer(address indexed from, address indexed to, uint tokens);
-    event Approval(address indexed tokenOwner, address indexed spender, uint tokens);
-}
-
-
-// ----------------------------------------------------------------------------
-// Contract function to receive approval and execute function in one call
-//
-// Borrowed from MiniMeToken
-// ----------------------------------------------------------------------------
-contract ApproveAndCallFallBack {
-    function receiveApproval(address from, uint256 tokens, address token, bytes data) public;
-}
-
-
-// ----------------------------------------------------------------------------
-// Owned contract
-// ----------------------------------------------------------------------------
-contract Owned {
-    address public owner;
-    address public newOwner;
-
-    event OwnershipTransferred(address indexed _from, address indexed _to);
-
-    constructor() public {
-        owner = msg.sender;
+contract Campaign {
+    struct Request {
+        string description;
+        uint value;
+        address recipient;
+        bool complete;
+        uint approvalCount;
+        mapping(address => bool) approvals;
     }
 
-    modifier onlyOwner {
-        require(msg.sender == owner);
+    Request[] public requests;
+    address public manager;
+    uint public minimumContribution;
+    mapping(address => bool) public approvers;
+    uint public approversCount;
+    
+    address public token;
+
+    modifier restricted() {
+        require(msg.sender == manager);
         _;
     }
 
-    function transferOwnership(address _newOwner) public onlyOwner {
-        newOwner = _newOwner;
-    }
-    function acceptOwnership() public {
-        require(msg.sender == newOwner);
-        emit OwnershipTransferred(owner, newOwner);
-        owner = newOwner;
-        newOwner = address(0);
-    }
-}
-
-
-// ----------------------------------------------------------------------------
-// ERC20 Token, with the addition of symbol, name and decimals and assisted
-// token transfers
-// ----------------------------------------------------------------------------
-contract CTAToken is ERC20Interface, Owned, SafeMath {
-    string public symbol;
-    string public  name;
-    uint8 public decimals;
-    uint public _totalSupply;
-
-    mapping(address => uint) balances;
-    mapping(address => mapping(address => uint)) allowed;
-
-    address private manager;
-
-    // ------------------------------------------------------------------------
-    // Constructor
-    // ------------------------------------------------------------------------
-    constructor(string _sym, string _name, address _manager) public {
-        symbol = _sym;
-        name = _name;
-        decimals = 0;
-        _totalSupply = 100000000000000000000000000;
-        balances[manager] = _totalSupply;
+    function Campaign(uint minimum, address creator, string _sym, string _name) public {
+        manager = creator;
+        minimumContribution = minimum;
         
-        emit Transfer(address(0), manager, _totalSupply);
+        token = new CampaignsToken(_sym, _name);
     }
 
-
-    // ------------------------------------------------------------------------
-    // Total supply
-    // ------------------------------------------------------------------------
-    function totalSupply() public constant returns (uint) {
-        return _totalSupply - balances[address(0)];
-    }
-    
-    function tokenEmited() public constant returns (uint) {
-        return _totalSupply - balances[manager];
-    }
-    
-    function tokenAvailable() public constant returns (uint) {
-        return balances[manager];
+    function contribute() public payable {
+        require(msg.value > minimumContribution);
+        require(ERC20Interface(token).totalSupply() > 0, "We not can accept more investors");
+        require(ERC20Interface(token).totalSupply() > uint(msg.value/minimumContribution), "We not have token for this investor");
+        
+        
+        approvers[msg.sender] = true;
+        approversCount += uint(msg.value/minimumContribution);
+        
+        ERC20Interface(token).transfer(msg.sender, uint(msg.value/minimumContribution));
     }
 
-    // ------------------------------------------------------------------------
-    // Get the token balance for account tokenOwner
-    // ------------------------------------------------------------------------
-    function balanceOf(address tokenOwner) public constant returns (uint balance) {
-        return balances[tokenOwner];
+    function createRequest(string description, uint value, address recipient) public restricted {
+        Request memory newRequest = Request({
+            description: description,
+            value: value,
+            recipient: recipient,
+            complete: false,
+            approvalCount: 0
+        });
+
+        requests.push(newRequest);
     }
 
+    function approveRequest(uint index) public {
+        Request storage request = requests[index];
 
-    // ------------------------------------------------------------------------
-    // Transfer the balance from token owner's account to to account
-    // - Owner's account must have sufficient balance to transfer
-    // - 0 value transfers are allowed
-    // ------------------------------------------------------------------------
-    function transfer(address to, uint tokens) public returns (bool success) {
-        balances[msg.sender] = safeSub(balances[msg.sender], tokens);
-        balances[to] = safeAdd(balances[to], tokens);
-        emit Transfer(msg.sender, to, tokens);
-        return true;
+        require(approvers[msg.sender]);
+        require(!request.approvals[msg.sender]);
+
+        request.approvals[msg.sender] = true;
+        request.approvalCount += ERC20Interface(token).balanceOf(msg.sender);
     }
 
+    function finalizeRequest(uint index) public restricted {
+        Request storage request = requests[index];
 
-    // ------------------------------------------------------------------------
-    // Token owner can approve for spender to transferFrom(...) tokens
-    // from the token owner's account
-    //
-    // https://github.com/ethereum/EIPs/blob/master/EIPS/eip-20-token-standard.md
-    // recommends that there are no checks for the approval double-spend attack
-    // as this should be implemented in user interfaces 
-    // ------------------------------------------------------------------------
-    function approve(address spender, uint tokens) public returns (bool success) {
-        allowed[msg.sender][spender] = tokens;
-        emit Approval(msg.sender, spender, tokens);
-        return true;
+        require(request.approvalCount > (approversCount / 2));
+        require(!request.complete);
+
+        request.recipient.transfer(request.value);
+        request.complete = true;
     }
 
-
-    // ------------------------------------------------------------------------
-    // Transfer tokens from the from account to the to account
-    // 
-    // The calling account must already have sufficient tokens approve(...)-d
-    // for spending from the from account and
-    // - From account must have sufficient balance to transfer
-    // - Spender must have sufficient allowance to transfer
-    // - 0 value transfers are allowed
-    // ------------------------------------------------------------------------
-    function transferFrom(address from, address to, uint tokens) public returns (bool success) {
-        balances[from] = safeSub(balances[from], tokens);
-        allowed[from][msg.sender] = safeSub(allowed[from][msg.sender], tokens);
-        balances[to] = safeAdd(balances[to], tokens);
-        emit Transfer(from, to, tokens);
-        return true;
+    function getSummary() public view returns (
+      uint, uint, uint, uint, address
+      ) {
+        return (
+          minimumContribution,
+          this.balance,
+          requests.length,
+          approversCount,
+          manager
+        );
     }
 
-
-    // ------------------------------------------------------------------------
-    // Returns the amount of tokens approved by the owner that can be
-    // transferred to the spender's account
-    // ------------------------------------------------------------------------
-    function allowance(address tokenOwner, address spender) public constant returns (uint remaining) {
-        return allowed[tokenOwner][spender];
-    }
-
-
-    // ------------------------------------------------------------------------
-    // Token owner can approve for spender to transferFrom(...) tokens
-    // from the token owner's account. The spender contract function
-    // receiveApproval(...) is then executed
-    // ------------------------------------------------------------------------
-    function approveAndCall(address spender, uint tokens, bytes data) public returns (bool success) {
-        allowed[msg.sender][spender] = tokens;
-        emit Approval(msg.sender, spender, tokens);
-        ApproveAndCallFallBack(spender).receiveApproval(msg.sender, tokens, this, data);
-        return true;
-    }
-
-
-    // ------------------------------------------------------------------------
-    // Don't accept ETH
-    // ------------------------------------------------------------------------
-    function () public payable {
-        revert();
-    }
-
-
-    // ------------------------------------------------------------------------
-    // Owner can transfer out any accidentally sent ERC20 tokens
-    // ------------------------------------------------------------------------
-    function transferAnyERC20Token(address tokenAddress, uint tokens) public onlyOwner returns (bool success) {
-        return ERC20Interface(tokenAddress).transfer(owner, tokens);
+    function getRequestsCount() public view returns (uint) {
+        return requests.length;
     }
 }
